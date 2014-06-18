@@ -17,15 +17,20 @@
 package com.android.providers.telephony;
 
 import android.app.AppOpsManager;
+import static com.android.internal.telephony.TelephonyConstants.DSDS_SLOT_1_ID;
+import static com.android.internal.telephony.TelephonyConstants.DSDS_SLOT_2_ID;
+
 import android.content.ContentProvider;
 import android.content.ContentResolver;
 import android.content.ContentValues;
+import android.content.Context;
 import android.content.UriMatcher;
 
 import android.database.Cursor;
 import android.database.DatabaseUtils;
 import android.database.MatrixCursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteException;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.database.sqlite.SQLiteQueryBuilder;
 import android.net.Uri;
@@ -39,6 +44,7 @@ import android.provider.Telephony.TextBasedSmsColumns;
 import android.provider.Telephony.Threads;
 import android.telephony.SmsManager;
 import android.telephony.SmsMessage;
+import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.Log;
 
@@ -48,6 +54,7 @@ import java.util.HashMap;
 public class SmsProvider extends ContentProvider {
     private static final Uri NOTIFICATION_URI = Uri.parse("content://sms");
     private static final Uri ICC_URI = Uri.parse("content://sms/icc");
+    private static final Uri ICC2_URI = Uri.parse("content://sms/icc2");
     static final String TABLE_SMS = "sms";
     private static final String TABLE_RAW = "raw";
     private static final String TABLE_SR_PENDING = "sr_pending";
@@ -79,7 +86,9 @@ public class SmsProvider extends ContentProvider {
         "type",                         // Always MESSAGE_TYPE_ALL.
         "locked",                       // Always 0 (false).
         "error_code",                   // Always 0
-        "_id"
+        "_id",
+        "imsi",                         // Always ""
+        "bind_number"                   // Always ""
     };
 
     @Override
@@ -202,13 +211,21 @@ public class SmsProvider extends ContentProvider {
                 break;
 
             case SMS_ALL_ICC:
-                return getAllMessagesFromIcc();
+                return getAllMessagesFromIcc(DSDS_SLOT_1_ID);
 
-            case SMS_ICC:
+            case SMS_ICC: {
                 String messageIndexString = url.getPathSegments().get(1);
 
-                return getSingleMessageFromIcc(messageIndexString);
+                return getSingleMessageFromIcc(DSDS_SLOT_1_ID,messageIndexString);
+            }
+            case SMS_ALL_ICC2:
+                return getAllMessagesFromIcc(DSDS_SLOT_2_ID);
 
+            case SMS_ICC2: {
+                String messageIndexString = url.getPathSegments().get(1);
+
+                return getSingleMessageFromIcc(DSDS_SLOT_2_ID,messageIndexString);
+            }
             default:
                 Log.e(TAG, "Invalid request: " + url);
                 return null;
@@ -235,13 +252,13 @@ public class SmsProvider extends ContentProvider {
     private Object[] convertIccToSms(SmsMessage message, int id) {
         // N.B.: These calls must appear in the same order as the
         // columns appear in ICC_COLUMNS.
-        Object[] row = new Object[13];
+        Object[] row = new Object[15];
         row[0] = message.getServiceCenterAddress();
         row[1] = message.getDisplayOriginatingAddress();
         row[2] = String.valueOf(message.getMessageClass());
         row[3] = message.getDisplayMessageBody();
         row[4] = message.getTimestampMillis();
-        row[5] = Sms.STATUS_NONE;
+        row[5] = message.getStatusOnSim();
         row[6] = message.getIndexOnIcc();
         row[7] = message.isStatusReportMessage();
         row[8] = "sms";
@@ -249,17 +266,25 @@ public class SmsProvider extends ContentProvider {
         row[10] = 0;      // locked
         row[11] = 0;      // error_code
         row[12] = id;
+        row[13] = "";
+        row[14] = "";
         return row;
     }
 
     /**
      * Return a Cursor containing just one message from the ICC.
      */
-    private Cursor getSingleMessageFromIcc(String messageIndexString) {
+    private Cursor getSingleMessageFromIcc(int simIndex, String messageIndexString) {
         try {
             int messageIndex = Integer.parseInt(messageIndexString);
-            SmsManager smsManager = SmsManager.getDefault();
-            ArrayList<SmsMessage> messages = smsManager.getAllMessagesFromIcc();
+            ArrayList<SmsMessage> messages;
+            SmsManager smsManager = simIndex != DSDS_SLOT_2_ID ? SmsManager.getDefault()
+                : SmsManager.get2ndSmsManager();
+            if (simIndex != DSDS_SLOT_2_ID) {
+                messages = smsManager.getAllMessagesFromIcc();
+            } else {
+                messages = smsManager.getAllMessagesFromIcc2();
+            }
 
             SmsMessage message = messages.get(messageIndex);
             if (message == null) {
@@ -278,14 +303,19 @@ public class SmsProvider extends ContentProvider {
     /**
      * Return a Cursor listing all the messages stored on the ICC.
      */
-    private Cursor getAllMessagesFromIcc() {
-        SmsManager smsManager = SmsManager.getDefault();
+    private Cursor getAllMessagesFromIcc(int simIndex) {
         ArrayList<SmsMessage> messages;
+        SmsManager smsManager = simIndex != DSDS_SLOT_2_ID ? SmsManager.getDefault()
+            : SmsManager.get2ndSmsManager();
 
         // use phone app permissions to avoid UID mismatch in AppOpsManager.noteOp() call
         long token = Binder.clearCallingIdentity();
         try {
-            messages = smsManager.getAllMessagesFromIcc();
+            if (simIndex != DSDS_SLOT_2_ID) {
+                messages = smsManager.getAllMessagesFromIcc();
+            } else {
+                messages = smsManager.getAllMessagesFromIcc2();
+            }
         } finally {
             Binder.restoreCallingIdentity(token);
         }
@@ -424,12 +454,14 @@ public class SmsProvider extends ContentProvider {
         if (table.equals(TABLE_SMS)) {
             boolean addDate = false;
             boolean addType = false;
+            boolean addIMSI = false;
 
             // Make sure that the date and type are set
             if (initialValues == null) {
                 values = new ContentValues(1);
                 addDate = true;
                 addType = true;
+                addIMSI = true;
             } else {
                 values = new ContentValues(initialValues);
 
@@ -440,6 +472,10 @@ public class SmsProvider extends ContentProvider {
                 if (!initialValues.containsKey(Sms.TYPE)) {
                     addType = true;
                 }
+
+                if (!initialValues.containsKey(Sms.IMSI)) {
+                    addIMSI = true;
+                }
             }
 
             if (addDate) {
@@ -448,6 +484,14 @@ public class SmsProvider extends ContentProvider {
 
             if (addType && (type != Sms.MESSAGE_TYPE_ALL)) {
                 values.put(Sms.TYPE, Integer.valueOf(type));
+            }
+
+            if (addIMSI) {
+                String imsi = ((TelephonyManager)getContext().getSystemService(Context.TELEPHONY_SERVICE))
+                    .getSubscriberId();
+                if (imsi != null) {
+                    values.put(Sms.IMSI, imsi);
+                }
             }
 
             // thread_id
@@ -586,11 +630,14 @@ public class SmsProvider extends ContentProvider {
                 count = db.delete("sr_pending", where, whereArgs);
                 break;
 
-            case SMS_ICC:
+            case SMS_ICC:{
                 String messageIndexString = url.getPathSegments().get(1);
-
-                return deleteMessageFromIcc(messageIndexString);
-
+                return deleteMessageFromIcc(DSDS_SLOT_1_ID, messageIndexString);
+            }
+            case SMS_ICC2:{
+                String messageIndexString = url.getPathSegments().get(1);
+                return deleteMessageFromIcc(DSDS_SLOT_2_ID, messageIndexString);
+            }
             default:
                 throw new IllegalArgumentException("Unknown URL");
         }
@@ -605,12 +652,13 @@ public class SmsProvider extends ContentProvider {
      * Delete the message at index from ICC.  Return true iff
      * successful.
      */
-    private int deleteMessageFromIcc(String messageIndexString) {
-        SmsManager smsManager = SmsManager.getDefault();
+    private int deleteMessageFromIcc(int simIndex, String messageIndexString) {
 
         try {
-            return smsManager.deleteMessageFromIcc(
-                    Integer.parseInt(messageIndexString))
+            SmsManager smsManager = simIndex != DSDS_SLOT_2_ID ? SmsManager.getDefault()
+                : SmsManager.get2ndSmsManager();
+                return smsManager.deleteMessageFromIcc(
+                        Integer.parseInt(messageIndexString))
                     ? 1 : 0;
         } catch (NumberFormatException exception) {
             throw new IllegalArgumentException(
@@ -684,7 +732,12 @@ public class SmsProvider extends ContentProvider {
         }
 
         where = DatabaseUtils.concatenateWhere(where, extraWhere);
-        count = db.update(table, values, where, whereArgs);
+        try {
+            count = db.update(table, values, where, whereArgs);
+        } catch (SQLiteException e) {
+            Log.e(TAG, "SQLiteException: " + e);
+            count = 0;
+        }
 
         if (count > 0) {
             if (Log.isLoggable(TAG, Log.VERBOSE)) {
@@ -740,6 +793,8 @@ public class SmsProvider extends ContentProvider {
     private static final int SMS_FAILED_ID = 25;
     private static final int SMS_QUEUED = 26;
     private static final int SMS_UNDELIVERED = 27;
+    private static final int SMS_ICC2 = 28;
+    private static final int SMS_ALL_ICC2 = 29;
 
     private static final UriMatcher sURLMatcher =
             new UriMatcher(UriMatcher.NO_MATCH);
@@ -770,6 +825,8 @@ public class SmsProvider extends ContentProvider {
         sURLMatcher.addURI("sms", "sr_pending", SMS_STATUS_PENDING);
         sURLMatcher.addURI("sms", "icc", SMS_ALL_ICC);
         sURLMatcher.addURI("sms", "icc/#", SMS_ICC);
+        sURLMatcher.addURI("sms", "icc2", SMS_ALL_ICC2);
+        sURLMatcher.addURI("sms", "icc2/#", SMS_ICC2);
         //we keep these for not breaking old applications
         sURLMatcher.addURI("sms", "sim", SMS_ALL_ICC);
         sURLMatcher.addURI("sms", "sim/#", SMS_ICC);

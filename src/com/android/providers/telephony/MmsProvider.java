@@ -38,6 +38,7 @@ import android.provider.Telephony.MmsSms;
 import android.provider.Telephony.Mms.Addr;
 import android.provider.Telephony.Mms.Part;
 import android.provider.Telephony.Mms.Rate;
+import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.Log;
 
@@ -333,6 +334,7 @@ public class MmsProvider extends ContentProvider {
         if (table.equals(TABLE_PDU)) {
             boolean addDate = !values.containsKey(Mms.DATE);
             boolean addMsgBox = !values.containsKey(Mms.MESSAGE_BOX);
+            boolean addIMSI = !values.containsKey(Mms.IMSI);
 
             // Filter keys we don't support yet.
             filterUnsupportedKeys(values);
@@ -349,6 +351,14 @@ public class MmsProvider extends ContentProvider {
 
             if (addMsgBox && (msgBox != Mms.MESSAGE_BOX_ALL)) {
                 finalValues.put(Mms.MESSAGE_BOX, msgBox);
+            }
+
+            if (addIMSI) { //refdsds
+                String imsi = ((TelephonyManager)getContext().getSystemService(Context.TELEPHONY_SERVICE))
+                    .getSubscriberId();
+                if (imsi != null) {
+                    finalValues.put(Mms.IMSI, imsi);
+                }
             }
 
             if (msgBox != Mms.MESSAGE_BOX_INBOX) {

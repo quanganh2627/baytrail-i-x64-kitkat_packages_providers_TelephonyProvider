@@ -593,6 +593,7 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
                    Mms.DELIVERY_REPORT + " INTEGER," +
                    Mms.LOCKED + " INTEGER DEFAULT 0," +
                    Mms.SEEN + " INTEGER DEFAULT 0," +
+                   Mms.IMSI + " TEXT," +
                    Mms.TEXT_ONLY + " INTEGER DEFAULT 0" +
                    ");");
 
@@ -836,7 +837,8 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
                    "service_center TEXT," +
                    "locked INTEGER DEFAULT 0," +
                    "error_code INTEGER DEFAULT 0," +
-                   "seen INTEGER DEFAULT 0" +
+                   "seen INTEGER DEFAULT 0," +
+                   Sms.IMSI + " TEXT" +
                    ");");
 
         /**
@@ -1273,6 +1275,29 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
             } finally {
                 db.endTransaction();
             }
+            // fall through
+        case 57:
+            if (currentVersion <= 57) {
+                return;
+            }
+
+            db.beginTransaction();
+            try {
+                upgradeDatabaseToVersion58(db);
+                db.setTransactionSuccessful();
+            } catch (Throwable ex) {
+                Log.e(TAG, ex.getMessage(), ex);
+                break;
+            } finally {
+                db.endTransaction();
+            }
+            // fall through
+        case 58:
+            if (currentVersion <= 58) {
+                return;
+            }
+
+            //fall through
             return;
         }
 
@@ -1472,6 +1497,14 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
     private void upgradeDatabaseToVersion57(SQLiteDatabase db) {
         // Clear out bad rows, those with empty threadIds, from the pdu table.
         db.execSQL("DELETE FROM " + MmsProvider.TABLE_PDU + " WHERE " + Mms.THREAD_ID + " IS NULL");
+    }
+
+    private void upgradeDatabaseToVersion58(SQLiteDatabase db) {
+        // Add 'imsi' column to sms table.
+        db.execSQL("ALTER TABLE sms ADD COLUMN " + Sms.IMSI + " TEXT");
+
+        // Add 'imsi' column to pdu table.
+        db.execSQL("ALTER TABLE pdu ADD COLUMN " + Mms.IMSI + " TEXT");
     }
 
     @Override

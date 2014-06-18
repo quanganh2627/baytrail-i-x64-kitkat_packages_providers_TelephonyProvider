@@ -30,6 +30,7 @@ import android.database.SQLException;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.database.sqlite.SQLiteQueryBuilder;
+import android.net.ConnectivityManager;
 import android.net.Uri;
 import android.os.Environment;
 import android.provider.Telephony;
@@ -39,6 +40,7 @@ import android.util.Xml;
 import com.android.internal.telephony.BaseCommands;
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.PhoneConstants;
+import com.android.internal.telephony.TelephonyConstants;
 import com.android.internal.util.XmlUtils;
 
 import org.xmlpull.v1.XmlPullParser;
@@ -63,11 +65,21 @@ public class TelephonyProvider extends ContentProvider
     private static final int URL_PREFERAPN = 5;
     private static final int URL_PREFERAPN_NO_UPDATE = 6;
 
+    private static final int URL_TELEPHONY2 = 7;
+    private static final int URL_CURRENT2 = 8;
+    private static final int URL_ID2 = 9;
+    private static final int URL_RESTOREAPN2 = 10;
+    private static final int URL_PREFERAPN2 = 11;
+    private static final int URL_PREFERAPN2_NO_UPDATE = 12;
+
     private static final String TAG = "TelephonyProvider";
     private static final String CARRIERS_TABLE = "carriers";
+    private static final String CARRIERS2_TABLE = "carriers2";
 
     private static final String PREF_FILE = "preferred-apn";
     private static final String COLUMN_APN_ID = "apn_id";
+    private static final String COLUMN_APN_ID2 = "apn_id2";
+    private static final String APN_CONFIG_CHECKSUM = "apn_conf_checksum";
 
     private static final String PARTNER_APNS_PATH = "etc/apns-conf.xml";
 
@@ -83,6 +95,13 @@ public class TelephonyProvider extends ContentProvider
         s_urlMatcher.addURI("telephony", "carriers/restore", URL_RESTOREAPN);
         s_urlMatcher.addURI("telephony", "carriers/preferapn", URL_PREFERAPN);
         s_urlMatcher.addURI("telephony", "carriers/preferapn_no_update", URL_PREFERAPN_NO_UPDATE);
+
+        s_urlMatcher.addURI("telephony", "carriers2", URL_TELEPHONY2);
+        s_urlMatcher.addURI("telephony", "carriers2/current", URL_CURRENT2);
+        s_urlMatcher.addURI("telephony", "carriers2/#", URL_ID2);
+        s_urlMatcher.addURI("telephony", "carriers2/restore", URL_RESTOREAPN2);
+        s_urlMatcher.addURI("telephony", "carriers2/preferapn", URL_PREFERAPN2);
+        s_urlMatcher.addURI("telephony", "carriers2/preferapn_no_update", URL_PREFERAPN2_NO_UPDATE);
 
         s_currentNullMap = new ContentValues(1);
         s_currentNullMap.put("current", (Long) null);
@@ -148,11 +167,39 @@ public class TelephonyProvider extends ContentProvider
                     "bearer INTEGER," +
                     "mvno_type TEXT," +
                     "mvno_match_data TEXT);");
+            initDatabase(db, true);
 
-            initDatabase(db);
+            if (TelephonyConstants.IS_DSDS) {
+                db.execSQL("CREATE TABLE " + CARRIERS2_TABLE +
+                    "(_id INTEGER PRIMARY KEY," +
+                    "name TEXT," +
+                    "numeric TEXT," +
+                    "mcc TEXT," +
+                    "mnc TEXT," +
+                    "apn TEXT," +
+                    "user TEXT," +
+                    "server TEXT," +
+                    "password TEXT," +
+                    "proxy TEXT," +
+                    "port TEXT," +
+                    "mmsproxy TEXT," +
+                    "mmsport TEXT," +
+                    "mmsc TEXT," +
+                    "authtype INTEGER," +
+                    "type TEXT," +
+                    "current INTEGER," +
+                    "protocol TEXT," +
+                    "roaming_protocol TEXT," +
+                    "carrier_enabled BOOLEAN," +
+                    "bearer INTEGER," +
+                    "mvno_type TEXT," +
+                    "mvno_match_data TEXT);");
+
+                initDatabase(db, false);
+            }
         }
 
-        private void initDatabase(SQLiteDatabase db) {
+        private void initDatabase(SQLiteDatabase db, boolean isTableZero) {
             // Read internal APNS data
             Resources r = mContext.getResources();
             XmlResourceParser parser = r.getXml(com.android.internal.R.xml.apns);
@@ -160,7 +207,7 @@ public class TelephonyProvider extends ContentProvider
             try {
                 XmlUtils.beginDocument(parser, "apns");
                 publicversion = Integer.parseInt(parser.getAttributeValue(null, "version"));
-                loadApns(db, parser);
+                loadApns(db, parser, isTableZero);
             } catch (Exception e) {
                 Log.e(TAG, "Got exception while loading APN database.", e);
             } finally {
@@ -185,7 +232,7 @@ public class TelephonyProvider extends ContentProvider
                             + confFile.getAbsolutePath());
                 }
 
-                loadApns(db, confparser);
+                loadApns(db, confparser, isTableZero);
             } catch (FileNotFoundException e) {
                 // It's ok if the file isn't found. It means there isn't a confidential file
                 // Log.e(TAG, "File not found: '" + confFile.getAbsolutePath() + "'");
@@ -335,7 +382,8 @@ public class TelephonyProvider extends ContentProvider
          * @param parser the xml parser
          *
          */
-        private void loadApns(SQLiteDatabase db, XmlPullParser parser) {
+        private void loadApns(SQLiteDatabase db, XmlPullParser parser, boolean isTableZero) {
+            String table = isTableZero ? CARRIERS_TABLE : CARRIERS2_TABLE;
             if (parser != null) {
                 try {
                     db.beginTransaction();
@@ -345,7 +393,7 @@ public class TelephonyProvider extends ContentProvider
                         if (row == null) {
                             throw new XmlPullParserException("Expected 'apn' tag", parser, null);
                         }
-                        insertAddingDefaults(db, CARRIERS_TABLE, row);
+                        insertAddingDefaults(db, table, row);
                         XmlUtils.nextElement(parser);
                     }
                     db.setTransactionSuccessful();
@@ -384,7 +432,7 @@ public class TelephonyProvider extends ContentProvider
             if (row.containsKey(Telephony.Carriers.MVNO_MATCH_DATA) == false) {
                 row.put(Telephony.Carriers.MVNO_MATCH_DATA, "");
             }
-            db.insert(CARRIERS_TABLE, null, row);
+            db.insert(table, null, row);
         }
     }
 
@@ -394,16 +442,20 @@ public class TelephonyProvider extends ContentProvider
         return true;
     }
 
-    private void setPreferredApnId(Long id) {
+    private void setPreferredApnId(Long id, boolean isTableZero) {
+        String prefApnId = isTableZero ? COLUMN_APN_ID : COLUMN_APN_ID2;
+        if (DBG) Log.d(TAG, "setPreferredApnId,prefApnId:" + prefApnId + ", id:"
+                                       + id + ", isTableZero:" + isTableZero);
         SharedPreferences sp = getContext().getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
         SharedPreferences.Editor editor = sp.edit();
-        editor.putLong(COLUMN_APN_ID, id != null ? id.longValue() : -1);
+        editor.putLong(prefApnId, id != null ? id.longValue() : -1);
         editor.apply();
     }
 
-    private long getPreferredApnId() {
+    private long getPreferredApnId(boolean isTableZero) {
+        String prefApnId = isTableZero ? COLUMN_APN_ID : COLUMN_APN_ID2;
         SharedPreferences sp = getContext().getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
-        return sp.getLong(COLUMN_APN_ID, -1);
+        return sp.getLong(prefApnId, -1);
     }
 
     @Override
@@ -414,28 +466,34 @@ public class TelephonyProvider extends ContentProvider
         qb.setTables("carriers");
 
         int match = s_urlMatcher.match(url);
+        boolean isTableZero = usingTableZero(match);
+        qb.setTables(isTableZero ? CARRIERS_TABLE : CARRIERS2_TABLE);
         switch (match) {
             // do nothing
-            case URL_TELEPHONY: {
+            case URL_TELEPHONY:
+            case URL_TELEPHONY2: {
                 break;
             }
 
-
-            case URL_CURRENT: {
+            case URL_CURRENT:
+            case URL_CURRENT2: {
                 qb.appendWhere("current IS NOT NULL");
                 // do not ignore the selection since MMS may use it.
                 //selection = null;
                 break;
             }
 
-            case URL_ID: {
+            case URL_ID:
+            case URL_ID2: {
                 qb.appendWhere("_id = " + url.getPathSegments().get(1));
                 break;
             }
 
             case URL_PREFERAPN:
-            case URL_PREFERAPN_NO_UPDATE: {
-                qb.appendWhere("_id = " + getPreferredApnId());
+            case URL_PREFERAPN2:
+            case URL_PREFERAPN_NO_UPDATE:
+            case URL_PREFERAPN2_NO_UPDATE: {
+                qb.appendWhere("_id = " + getPreferredApnId(isTableZero));
                 break;
             }
 
@@ -479,13 +537,17 @@ public class TelephonyProvider extends ContentProvider
     {
         switch (s_urlMatcher.match(url)) {
         case URL_TELEPHONY:
+        case URL_TELEPHONY2:
             return "vnd.android.cursor.dir/telephony-carrier";
 
         case URL_ID:
+        case URL_ID2:
             return "vnd.android.cursor.item/telephony-carrier";
 
         case URL_PREFERAPN:
+        case URL_PREFERAPN2:
         case URL_PREFERAPN_NO_UPDATE:
+        case URL_PREFERAPN2_NO_UPDATE:
             return "vnd.android.cursor.item/telephony-carrier";
 
         default:
@@ -503,9 +565,14 @@ public class TelephonyProvider extends ContentProvider
         SQLiteDatabase db = mOpenHelper.getWritableDatabase();
         int match = s_urlMatcher.match(url);
         boolean notify = false;
+        boolean isTableZero = usingTableZero(match);
+        String table = isTableZero ? CARRIERS_TABLE : CARRIERS2_TABLE;
+        final Uri carrierUri = usingPrimaryPhone(match) ? Telephony.Carriers.CONTENT_URI
+                                                        : Telephony.Carriers.CONTENT_URI2;
         switch (match)
         {
             case URL_TELEPHONY:
+            case URL_TELEPHONY2:
             {
                 ContentValues values;
                 if (initialValues != null) {
@@ -565,10 +632,10 @@ public class TelephonyProvider extends ContentProvider
                     values.put(Telephony.Carriers.MVNO_MATCH_DATA, "");
                 }
 
-                long rowID = db.insert(CARRIERS_TABLE, null, values);
+                long rowID = db.insert(table, null, values);
                 if (rowID > 0)
                 {
-                    result = ContentUris.withAppendedId(Telephony.Carriers.CONTENT_URI, rowID);
+                    result = ContentUris.withAppendedId(carrierUri, rowID);
                     notify = true;
                 }
 
@@ -577,12 +644,13 @@ public class TelephonyProvider extends ContentProvider
             }
 
             case URL_CURRENT:
+            case URL_CURRENT2:
             {
                 // null out the previous operator
-                db.update("carriers", s_currentNullMap, "current IS NOT NULL", null);
+                db.update(table, s_currentNullMap, "current IS NOT NULL", null);
 
                 String numeric = initialValues.getAsString("numeric");
-                int updated = db.update("carriers", s_currentSetMap,
+                int updated = db.update(table, s_currentSetMap,
                         "numeric = '" + numeric + "'", null);
 
                 if (updated > 0)
@@ -599,11 +667,14 @@ public class TelephonyProvider extends ContentProvider
             }
 
             case URL_PREFERAPN:
+            case URL_PREFERAPN2:
             case URL_PREFERAPN_NO_UPDATE:
+            case URL_PREFERAPN2_NO_UPDATE:
             {
                 if (initialValues != null) {
-                    if(initialValues.containsKey(COLUMN_APN_ID)) {
-                        setPreferredApnId(initialValues.getAsLong(COLUMN_APN_ID));
+                    String key = usingPrimaryPhone(match) ? COLUMN_APN_ID : COLUMN_APN_ID2;
+                    if (initialValues.containsKey(key)) {
+                        setPreferredApnId(initialValues.getAsLong(key), isTableZero);
                     }
                 }
                 break;
@@ -611,7 +682,7 @@ public class TelephonyProvider extends ContentProvider
         }
 
         if (notify) {
-            getContext().getContentResolver().notifyChange(Telephony.Carriers.CONTENT_URI, null);
+            getContext().getContentResolver().notifyChange(carrierUri, null);
         }
 
         return result;
@@ -626,38 +697,48 @@ public class TelephonyProvider extends ContentProvider
 
         SQLiteDatabase db = mOpenHelper.getWritableDatabase();
         int match = s_urlMatcher.match(url);
+        boolean isTableZero = usingTableZero(match);
+        String table = isTableZero ? CARRIERS_TABLE : CARRIERS2_TABLE;
+        final Uri carrierUri = usingPrimaryPhone(match) ? Telephony.Carriers.CONTENT_URI
+                                                        : Telephony.Carriers.CONTENT_URI2;
         switch (match)
         {
             case URL_TELEPHONY:
+            case URL_TELEPHONY2:
             {
-                count = db.delete(CARRIERS_TABLE, where, whereArgs);
+                count = db.delete(table, where, whereArgs);
                 break;
             }
 
             case URL_CURRENT:
+            case URL_CURRENT2:
             {
-                count = db.delete(CARRIERS_TABLE, where, whereArgs);
+                count = db.delete(table, where, whereArgs);
                 break;
             }
 
             case URL_ID:
+            case URL_ID2:
             {
-                count = db.delete(CARRIERS_TABLE, Telephony.Carriers._ID + "=?",
+                count = db.delete(table, Telephony.Carriers._ID + "=?",
                         new String[] { url.getLastPathSegment() });
                 break;
             }
 
-            case URL_RESTOREAPN: {
+            case URL_RESTOREAPN:
+            case URL_RESTOREAPN2: {
                 count = 1;
-                restoreDefaultAPN();
+                restoreDefaultAPN(isTableZero);
                 break;
             }
 
             case URL_PREFERAPN:
+            case URL_PREFERAPN2:
             case URL_PREFERAPN_NO_UPDATE:
+            case URL_PREFERAPN2_NO_UPDATE:
             {
-                setPreferredApnId((long)-1);
-                if (match == URL_PREFERAPN) count = 1;
+                setPreferredApnId((long)-1, isTableZero);
+                if (match == URL_PREFERAPN || match == URL_PREFERAPN2) count = 1;
                 break;
             }
 
@@ -667,7 +748,7 @@ public class TelephonyProvider extends ContentProvider
         }
 
         if (count > 0) {
-            getContext().getContentResolver().notifyChange(Telephony.Carriers.CONTENT_URI, null);
+            getContext().getContentResolver().notifyChange(carrierUri, null);
         }
 
         return count;
@@ -682,38 +763,48 @@ public class TelephonyProvider extends ContentProvider
 
         SQLiteDatabase db = mOpenHelper.getWritableDatabase();
         int match = s_urlMatcher.match(url);
+        boolean isTableZero = usingTableZero(match);
+        String table = isTableZero ? CARRIERS_TABLE : CARRIERS2_TABLE;
+        final Uri carrierUri = usingPrimaryPhone(match) ? Telephony.Carriers.CONTENT_URI
+                                                        : Telephony.Carriers.CONTENT_URI2;
         switch (match)
         {
             case URL_TELEPHONY:
+            case URL_TELEPHONY2:
             {
-                count = db.update(CARRIERS_TABLE, values, where, whereArgs);
+                count = db.update(table, values, where, whereArgs);
                 break;
             }
 
             case URL_CURRENT:
+            case URL_CURRENT2:
             {
-                count = db.update(CARRIERS_TABLE, values, where, whereArgs);
+                count = db.update(table, values, where, whereArgs);
                 break;
             }
 
             case URL_ID:
+            case URL_ID2:
             {
                 if (where != null || whereArgs != null) {
                     throw new UnsupportedOperationException(
                             "Cannot update URL " + url + " with a where clause");
                 }
-                count = db.update(CARRIERS_TABLE, values, Telephony.Carriers._ID + "=?",
+                count = db.update(table, values, Telephony.Carriers._ID + "=?",
                         new String[] { url.getLastPathSegment() });
                 break;
             }
 
             case URL_PREFERAPN:
+            case URL_PREFERAPN2:
             case URL_PREFERAPN_NO_UPDATE:
+            case URL_PREFERAPN2_NO_UPDATE:
             {
                 if (values != null) {
-                    if (values.containsKey(COLUMN_APN_ID)) {
-                        setPreferredApnId(values.getAsLong(COLUMN_APN_ID));
-                        if (match == URL_PREFERAPN) count = 1;
+                    String key = usingPrimaryPhone(match) ? COLUMN_APN_ID : COLUMN_APN_ID2;
+                    if (values.containsKey(key)) {
+                        setPreferredApnId(values.getAsLong(key), isTableZero);
+                        if (match == URL_PREFERAPN || match == URL_PREFERAPN2) count = 1;
                     }
                 }
                 break;
@@ -725,7 +816,7 @@ public class TelephonyProvider extends ContentProvider
         }
 
         if (count > 0) {
-            getContext().getContentResolver().notifyChange(Telephony.Carriers.CONTENT_URI, null);
+            getContext().getContentResolver().notifyChange(carrierUri, null);
         }
 
         return count;
@@ -738,15 +829,38 @@ public class TelephonyProvider extends ContentProvider
 
     private DatabaseHelper mOpenHelper;
 
-    private void restoreDefaultAPN() {
+    private void restoreDefaultAPN(boolean isTableZero) {
         SQLiteDatabase db = mOpenHelper.getWritableDatabase();
+        String table = isTableZero ? CARRIERS_TABLE : CARRIERS2_TABLE;
 
         try {
-            db.delete(CARRIERS_TABLE, null, null);
+            db.delete(table, null, null);
         } catch (SQLException e) {
             Log.e(TAG, "got exception when deleting to restore: " + e);
         }
-        setPreferredApnId((long)-1);
-        mOpenHelper.initDatabase(db);
+        setPreferredApnId((long)-1, isTableZero);
+        mOpenHelper.initDatabase(db, isTableZero);
+    }
+
+    private boolean usingTableZero(int match) {
+        boolean isPrimaryUrl = usingPrimaryPhone(match);
+        return isPrimaryOnSim1()
+                    ? isPrimaryUrl ? true : false
+                    : isPrimaryUrl ? false : true;
+    }
+
+    private boolean usingPrimaryPhone(int match) {
+        return (match == URL_TELEPHONY
+                            || match == URL_CURRENT
+                            || match == URL_ID
+                            || match == URL_RESTOREAPN
+                            || match == URL_PREFERAPN
+                            || match == URL_PREFERAPN_NO_UPDATE);
+    }
+
+    private boolean isPrimaryOnSim1() {
+        ConnectivityManager cm = (ConnectivityManager)getContext()
+                                 .getSystemService(Context.CONNECTIVITY_SERVICE);
+        return cm.getDataSim() == TelephonyConstants.DSDS_SLOT_1_ID;
     }
 }
