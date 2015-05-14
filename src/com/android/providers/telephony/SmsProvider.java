@@ -16,10 +16,15 @@
 
 package com.android.providers.telephony;
 
+import android.app.ActivityThread;
 import android.app.AppOpsManager;
 import android.content.ContentProvider;
 import android.content.ContentResolver;
 import android.content.ContentValues;
+import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.UriMatcher;
 import android.database.Cursor;
 import android.database.DatabaseUtils;
@@ -57,6 +62,10 @@ public class SmsProvider extends ContentProvider {
     private static final String[] CONTACT_QUERY_PROJECTION =
             new String[] { Contacts.Phones.PERSON_ID };
     private static final int PERSON_ID_COLUMN = 0;
+    private static final int SLOT_1 = 0;
+    private static final int SLOT_2 = 1;
+    private static final int INVALID_UID = -1;
+    private AppOpsManager mAppOps;
 
     /**
      * These are the columns that are available when reading SMS
@@ -85,7 +94,29 @@ public class SmsProvider extends ContentProvider {
     public boolean onCreate() {
         setAppOps(AppOpsManager.OP_READ_SMS, AppOpsManager.OP_WRITE_SMS);
         mOpenHelper = MmsSmsDatabaseHelper.getInstance(getContext());
+        mAppOps = (AppOpsManager)getContext().getSystemService(Context.APP_OPS_SERVICE);
+        String packageName = ActivityThread.currentPackageName();
+        mAppOps.setMode(AppOpsManager.OP_WRITE_ICC_SMS, getUidByPackageName(packageName),
+                packageName, AppOpsManager.MODE_ALLOWED);
         return true;
+    }
+
+    public int getUidByPackageName(String packageName) {
+        ApplicationInfo ai = null;
+
+        try {
+            PackageManager pm = getContext().getPackageManager();
+            ai = pm.getApplicationInfo(packageName, PackageManager.GET_ACTIVITIES);
+        } catch (NameNotFoundException e) {
+            e.printStackTrace();
+            return INVALID_UID;
+        }
+
+        if (ai != null) {
+            return ai.uid;
+        } else {
+            return INVALID_UID;
+        }
     }
 
     @Override
@@ -203,6 +234,12 @@ public class SmsProvider extends ContentProvider {
             case SMS_ALL_ICC:
                 return getAllMessagesFromIcc();
 
+            case SMS_SLOT1_ICC:
+                return getAllMessagesFromIccForSubscriber(SLOT_1);
+
+            case SMS_SLOT2_ICC:
+                return getAllMessagesFromIccForSubscriber(SLOT_2);
+
             case SMS_ICC:
                 String messageIndexString = url.getPathSegments().get(1);
 
@@ -294,6 +331,32 @@ public class SmsProvider extends ContentProvider {
         long token = Binder.clearCallingIdentity();
         try {
             messages = smsManager.getAllMessagesFromIcc();
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+
+        final int count = messages.size();
+        MatrixCursor cursor = new MatrixCursor(ICC_COLUMNS, count);
+        for (int i = 0; i < count; i++) {
+            SmsMessage message = messages.get(i);
+            if (message != null) {
+                cursor.addRow(convertIccToSms(message, i));
+            }
+        }
+        return withIccNotificationUri(cursor);
+    }
+
+    /**
+     * Return a Cursor listing all the messages stored on the ICC specified by slot.
+     */
+    private Cursor getAllMessagesFromIccForSubscriber(int slotId) {
+        SmsManager smsManager = SmsManager.getDefault();
+        ArrayList<SmsMessage> messages;
+
+        // use phone app permissions to avoid UID mismatch in AppOpsManager.noteOp() call
+        long token = Binder.clearCallingIdentity();
+        try {
+            messages = smsManager.getAllMessagesFromIccForSubscriber(slotId);
         } finally {
             Binder.restoreCallingIdentity(token);
         }
@@ -607,6 +670,16 @@ public class SmsProvider extends ContentProvider {
 
                 return deleteMessageFromIcc(messageIndexString);
 
+            case SMS_SLOT1_ICC_ID:
+                String messageIndexStringSlot1 = url.getPathSegments().get(1);
+
+                return deleteMessageFromIccForSubscriber(messageIndexStringSlot1, SLOT_1);
+
+            case SMS_SLOT2_ICC_ID:
+                String messageIndexStringSlot2 = url.getPathSegments().get(1);
+
+                return deleteMessageFromIccForSubscriber(messageIndexStringSlot2, SLOT_2);
+
             default:
                 throw new IllegalArgumentException("Unknown URL");
         }
@@ -618,7 +691,7 @@ public class SmsProvider extends ContentProvider {
     }
 
     /**
-     * Delete the message at index from ICC.  Return true iff
+     * Delete the message at index from ICC.  Return true if
      * successful.
      */
     private int deleteMessageFromIcc(String messageIndexString) {
@@ -628,6 +701,29 @@ public class SmsProvider extends ContentProvider {
         try {
             return smsManager.deleteMessageFromIcc(
                     Integer.parseInt(messageIndexString))
+                    ? 1 : 0;
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(
+                    "Bad SMS ICC ID: " + messageIndexString);
+        } finally {
+            ContentResolver cr = getContext().getContentResolver();
+            cr.notifyChange(ICC_URI, null, true, UserHandle.USER_ALL);
+
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    /**
+     * Delete the message at index from ICC specified by slot.  Return true if
+     * successful.
+     */
+    private int deleteMessageFromIccForSubscriber(String messageIndexString, int slotId) {
+        SmsManager smsManager = SmsManager.getDefault();
+        // Use phone id to avoid AppOps uid mismatch in telephony
+        long token = Binder.clearCallingIdentity();
+        try {
+            return smsManager.deleteMessageFromIccForSubscriber(
+                    Integer.parseInt(messageIndexString), slotId)
                     ? 1 : 0;
         } catch (NumberFormatException exception) {
             throw new IllegalArgumentException(
@@ -767,6 +863,10 @@ public class SmsProvider extends ContentProvider {
     private static final int SMS_FAILED_ID = 25;
     private static final int SMS_QUEUED = 26;
     private static final int SMS_UNDELIVERED = 27;
+    private static final int SMS_SLOT1_ICC = 28;
+    private static final int SMS_SLOT1_ICC_ID = 29;
+    private static final int SMS_SLOT2_ICC = 30;
+    private static final int SMS_SLOT2_ICC_ID = 31;
 
     private static final UriMatcher sURLMatcher =
             new UriMatcher(UriMatcher.NO_MATCH);
@@ -800,6 +900,10 @@ public class SmsProvider extends ContentProvider {
         //we keep these for not breaking old applications
         sURLMatcher.addURI("sms", "sim", SMS_ALL_ICC);
         sURLMatcher.addURI("sms", "sim/#", SMS_ICC);
+        sURLMatcher.addURI("sms", "icc1", SMS_SLOT1_ICC);
+        sURLMatcher.addURI("sms", "icc1/#", SMS_SLOT1_ICC_ID);
+        sURLMatcher.addURI("sms", "icc2", SMS_SLOT2_ICC);
+        sURLMatcher.addURI("sms", "icc2/#", SMS_SLOT2_ICC_ID);
 
         sConversationProjectionMap.put(Sms.Conversations.SNIPPET,
             "sms.body AS snippet");
